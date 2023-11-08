@@ -1,0 +1,17 @@
+# Docker compose file for local development.
+# Initialize your local environment variables either in your shell
+# or in the ".env" file.
+version: "3.7"
+services:
+  visual-search:
+    container_name: visual-search
+    build:
+      context: ./visual-search-service
+    networks:
+      - image-net
+    ports:
+      - "8003:80"
+
+networks:
+  image-net:
+    driver: bridge
