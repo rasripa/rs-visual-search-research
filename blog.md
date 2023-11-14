@@ -5,6 +5,17 @@
 - Explain the value of visual search for ecommerce - allowing customers to find products using image queries rather than just text search.
 - Include data points on influence of visual search
 - Overview of the architecture using SageMaker, Faiss, API Gateway, etc.
+Visual search is becoming an increasingly valuable capability for ecommerce companies to better serve their customers. By allowing shoppers to find products using image queries rather than just text search, visual search provides a more intuitive and user-friendly experience. According to Gartner, early adopter brands that redesign their websites to support visual and voice search will increase digital commerce revenue by 30%. Implementing visual search can lead to higher customer engagement, reduced returns, and increased sales. 
+
+In this post, you will walk through building visual search for an online store using multi-modal machine learning models and vector similarity search. The architecture consists of several components working together: Amazon SageMaker to host the multi-modal model, Faiss to create vector databases for efficient similarity search, API Gateway and Lambda to handle request routing and processing, and DynamoDB to store metadata. 
+
+We will use the CLIP model from OpenAI which has been pretrained to generate joint embeddings for images and text that capture semantic similarity. By indexing product images and text in a vector database using CLIP embeddings, we can find visually similar products by querying with a product image. The dataset used is [Flipkart Products](https://www.kaggle.com/datasets/PromptCloudHQ/flipkart-products) a pre-crawled dataset, taken as subset of a bigger dataset (more than 5.8 million products) that was created by extracting data from Flipkart.com.
+
+By the end of the post, you'll understand how to construct an end-to-end architecture using SageMaker, Faiss, API Gateway, Lambda, and other services to deliver visual search for ecommerce. This technique can enhance product discovery and shopping experiences across retail sites and apps. 
+
+![Alt text](ImageSearch-Phase1.png "Title")
+
+Let's get started!
 
 ### On Embeddings in Search with Vector Stores
 - V
@@ -13,11 +24,270 @@
 - Briefly introduce CLIP and how it can enable visual search by creating joint embeddings for images and text.
 - Step-by-step walkthrough of deploying CLIP inference endpoint on SageMaker using the Inference Toolkit.
 - Explain the purpose of the inference endpoint and how it will be used.
+CLIP (Contrastive Language-Image Pretraining) is a neural network model developed by OpenAI that has been pre-trained on a variety of (image, text) pairs scraped from the internet. It excels at finding semantic similarities between images and text descriptions. 
+
+CLIP creates a joint embedding space for images and text, meaning it can encode both modalities into the same high-dimensional vector representation. Images and texts with similar meaning will have closer embeddings in this space. This makes CLIP ideal for visual search, as we can embed product images and descriptions into a common vector space and find similarities.
+
+To leverage CLIP for our visual search system, we will deploy it as an inference endpoint on SageMaker. 
+
+Firstly, since we want the inference results to be computed embeddings, we use the [SageMaker Inference Toolkit](https://docs.aws.amazon.com/sagemaker/latest/dg/adapt-inference-container.html) to creat a custom inference handler script to handle requests and responses to/from the model. 
+```
+%%writefile code/inference.py
+import io
+import json
+import logging
+import sys
+from typing import Dict, Tuple
+import torch
+from PIL import Image
+from transformers import CLIPProcessor, CLIPModel
+import numpy as np
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(logging.StreamHandler(sys.stdout))
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def accurate_token_count(text: str, processor: CLIPProcessor) -> int:
+    return len(processor.tokenizer(text).input_ids)
+
+def chunk_text(text: str, processor: CLIPProcessor, max_tokens: int = 77) -> list:
+    words = text.split()
+    chunks, chunk, tokens = [], [], 0
+    
+    for word in words:
+        new_token_count = accurate_token_count(word, processor)
+        if tokens + new_token_count > max_tokens:
+            chunks.append(" ".join(chunk))
+            chunk = [word]
+            tokens = new_token_count
+        else:
+            chunk.append(word)
+            tokens += new_token_count
+            
+    if chunk:
+        chunks.append(" ".join(chunk))
+        
+    return chunks
+
+def model_fn(model_dir: str) -> Tuple[CLIPModel, CLIPProcessor]:
+    model = CLIPModel.from_pretrained(model_dir).to(device)
+    processor = CLIPProcessor.from_pretrained(model_dir)
+    return model, processor
+
+def input_fn(request_body, request_content_type):
+    assert request_content_type in ("application/json", "application/x-image"), f"{request_content_type} is an unknown type."
+    
+    content_type_map = {
+        "application/json": lambda x: json.loads(x)["inputs"],
+        "application/x-image": lambda x: Image.open(io.BytesIO(x))
+    }
+    
+    return request_content_type, content_type_map[request_content_type](request_body)
+
+def predict_fn(request_content_type_and_input_object, model_and_processor):
+    model, processor = model_and_processor
+    request_content_type, input_object = request_content_type_and_input_object
+    
+    def chunk_and_process_text(text):
+        text_chunks = chunk_text(text, processor)
+        features_sum, count = None, 0
+        
+        for text_chunk in text_chunks:
+            inputs = processor(text=text_chunk, padding=True, return_tensors="pt").to(device)
+            try:
+                features = model.get_text_features(**inputs)
+                if features_sum is None:
+                    features_sum = torch.zeros_like(features).to(device)
+                features_sum += features
+                count += 1
+            except RuntimeError as e:
+                logger.error(f"Text chunk '{text_chunk}' of length {len(text_chunk)} caused an error: {e}")
+
+        return (features_sum / count).detach()
+        
+    input_processors = {
+        "application/x-image": lambda x: processor(images=x, padding=True, return_tensors="pt").to(device),
+        "application/json": lambda x: chunk_and_process_text(x)
+    }
+    
+    feature_getters = {
+        "application/x-image": lambda x: model.get_image_features(**x),
+        "application/json": lambda x: x 
+    }
+    
+    inputs = input_processors[request_content_type](input_object)
+    return feature_getters[request_content_type](inputs)
+```
+For more details on the Sagemaker Inference Toolkit and functions to be implemented please refer to the [documentation](https://docs.aws.amazon.com/sagemaker/latest/dg/adapt-inference-container.html) and [git repo](https://github.com/aws/sagemaker-inference-toolkit).
+
+Next, we'll package the open source CLIP model along with the inference handler script in a model.tar.gz and copy to an Amazon S3 bucket location.
+```
+repository = "openai/clip-vit-large-patch14"
+model_id=repository.split("/")[-1]
+s3_location=f"s3://{sagesess.default_bucket()}/custom_inference/{model_id}/model.tar.gz"
+%conda install -y -c conda-forge git-lfs
+!git lfs install
+!git clone https://huggingface.co/$repository
+!cp -r code/ $model_id/code/
+%cd $model_id
+!tar zcvf model.tar.gz *
+!aws s3 cp model.tar.gz $s3_location
+```
+
+We then deploy our model to a Sagemaker inference endpoint
+```
+from sagemaker.huggingface.model import HuggingFaceModel
+
+# create Hugging Face Model Class
+huggingface_model = HuggingFaceModel(
+    model_data=s3_location,       # path to your model and script
+    role="arn:aws:iam::669775656565:role/service-role/AmazonSageMaker-ExecutionRole-20231011T142825",
+    transformers_version="4.26.0",  # transformers version used
+    pytorch_version="1.13.1",        # pytorch version used
+    py_version='py39', # python version used
+    sagemaker_session = sagesess
+)
+
+# deploy the endpoint endpoint
+clip_model = huggingface_model.deploy(
+    initial_instance_count=1,
+    instance_type="ml.g4dn.xlarge",
+    endpoint_name="clip-model",
+    )
+```
+
+Now we have a hosted CLIP inference endpoint on SageMaker that can accept image and text inputs and return embeddings for each. We can integrate this into our overall architecture by having our Lambda functions send requests during ingestion and search. The embeddings will populate our Faiss vector stores.
+
+In summary, deploying CLIP inference on SageMaker provides a scalable and fully managed way to generate multimodal embeddings from images and text within our visual search system. The hosted endpoint will be leveraged throughout our architecture.
 
 ### Building Product Image and Text Vector Stores with Faiss
 - Using in memory, can use opensearch, pgvector postgres any other
 - Explain how Faiss library allows efficient similarity search on vectors.
 - Walk through process of indexing product images and text in Faiss using CLIP endpoint.
+Now that we have our CLIP inference endpoint deployed on SageMaker, we can use it to embed our product catalog images and text into a numerical vector space. To enable ultra-fast similarity search on these embeddings, we will build vector databases using Faiss.
+
+Faiss enables ultra-fast similarity search on vector embeddings, making it ideal for powering visual search on our CLIP image and text embeddings. 
+
+#### Overview of Faiss
+
+Faiss is an open source library developed by Facebook AI Research for efficient similarity search and clustering of dense vectors. Some key features:
+
+- Optimized data structures like inverted indexes for rapid nearest neighbor search.
+- Support for GPU acceleration for high throughput ingestion and low latency queries.  
+- Flexible indexing options - flat, hierarchical, IVF (inverted file).
+
+By using Faiss to index the CLIP embeddings for our product catalog, we gain sub-second response times for similarity search queries.
+
+#### Indexing Process
+
+To build our Faiss indexes:
+
+1. Fetch product images and descriptions from our catalog database.
+
+2. Pass each image through the SageMaker CLIP endpoint to generate an image embedding vector.
+
+3. Pass each product's title and description through CLIP to get a text embedding. 
+
+4. Add the image and text embedding vectors to their respective Faiss indexes. 
+
+5. Store the index position to product ID mapping for retrieval.
+
+This gives us two vector databases - one for visual similarity based on product images, and one for semantic similarity based on product text.
+
+#### Implementation Details
+
+To allow  multi-threaded ingestion into Faiss, we:
+
+- Split the product catalog into chunks for multi-threaded processing.
+```
+NUM_PROCESSES = 400
+items_chunks = split_data(items, NUM_PROCESSES)
+```
+- Generate partial indexes per chunk using CLIP.
+```
+def process_records_partial(items_chunk):
+    
+    initialise_clip_model()
+    initialise_bedrock()
+    initialise_s3()
+    
+    local_image_embeddings = []
+    local_text_embeddings = []
+    local_image_id_to_record = {}
+    local_text_id_to_record = {}
+    image_idx = 0
+    idx = 0
+    
+    for item in tqdm(items_chunk):
+        product_id, image_url_list, description = process_item(item)
+        
+        image_embedding_count = 0
+        for image in image_url_list:
+            image_response = fetch_image(image)
+            if not image_response[1]:
+                continue
+            try:
+                image_content = image_response[0]
+                local_image_embeddings.append(normalise_embedding(np.array(get_image_embedding(image_content, clip_model)).astype('float32')))
+                image_embedding_count += 1
+            except Exception as e:
+                pass
+
+            local_image_id_to_record[image_idx] = product_id
+            image_idx += 1
+
+        if image_embedding_count == 0:
+            continue
+
+        try:
+            text_embedding_flt = np.array(get_text_embedding(clean_and_prepare_text(description), clip_model)).astype('float32')
+            local_text_embeddings.append(normalise_embedding(text_embedding_flt))
+            local_text_id_to_record[idx] = product_id
+            idx += 1
+        except Exception as e:
+            continue
+
+    return local_image_embeddings, local_text_embeddings, local_image_id_to_record, local_text_id_to_record
+
+```
+- Merge the partial indexes into the final Faiss stores.
+```
+with ThreadPoolExecutor(max_workers=NUM_PROCESSES) as executor:
+    futures = [executor.submit(process_records_partial, chunk) for chunk in tqdm(items_chunks)]
+
+# Initialize global arrays and dictionaries
+global_image_embeddings = []
+global_text_embeddings = []
+global_image_id_to_record = {}
+global_text_id_to_record = {}
+
+image_idx = 0
+text_idx = 0
+
+for future in tqdm(futures):
+    local_image_embeddings, local_text_embeddings, local_image_id_to_record, local_text_id_to_record = future.result()
+
+    global_image_embeddings.extend(local_image_embeddings)
+    global_text_embeddings.extend(local_text_embeddings)
+
+    for local_idx, product_id in local_image_id_to_record.items():
+        global_image_id_to_record[image_idx] = product_id
+        image_idx += 1
+
+    for local_idx, product_id in local_text_id_to_record.items():
+        global_text_id_to_record[text_idx] = product_id
+        text_idx += 1
+
+image_index.add(np.vstack(global_image_embeddings).astype('float32'))
+text_index.add(np.vstack(global_text_embeddings).astype('float32'))
+```
+This builds inverted indices that support ultra-fast similarity search. Given a query image embedding, we can find the most similar image embeddings and most similar text embeddings and thus the most visually and semantically similar products. 
+
+The indices will be loaded in memory for low-latency retrieval during search.
+
+In summary, leveraging Faiss gives us highly performant similarity search on our CLIP embeddings, enabling sub-second query response times. 
 
 ### Developing the Search API Backend
 - Architecture overview - API Gateway, Lambda functions, DynamoDB.
