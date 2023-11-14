@@ -285,9 +285,7 @@ text_index.add(np.vstack(global_text_embeddings).astype('float32'))
 ```
 This builds inverted indices that support ultra-fast similarity search. Given a query image embedding, we can find the most similar image embeddings and most similar text embeddings and thus the most visually and semantically similar products. 
 
-The indices will be loaded in memory for low-latency retrieval during search.
-
-In summary, leveraging Faiss gives us highly performant similarity search on our CLIP embeddings, enabling sub-second query response times. 
+The indices will be loaded in memory for low-latency retrieval during search, but other vector stores like [Amazon OpenSearch vector databases](https://docs.aws.amazon.com/opensearch-service/latest/developerguide/serverless-vector-search.html), [pgvector on Amazon Aurora PostgreSQL](https://aws.amazon.com/about-aws/whats-new/2023/07/amazon-aurora-postgresql-pgvector-vector-storage-similarity-search/) or any others to store your embeddings.
 
 ### Developing the Search API Backend
 - Architecture overview - API Gateway, Lambda functions, DynamoDB.
