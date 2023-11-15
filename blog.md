@@ -314,6 +314,78 @@ The indices will be loaded in memory for low-latency retrieval during search, bu
 - Explain role of each component.
 - Provide code snippets for key functions.
 
+The backend for our visual search application consists of API Gateway, Lambda functions, and DynamoDB working together to handle request routing, processing, and metadata storage. 
+
+#### API Gateway
+
+Amazon API Gateway is used to host and manage the REST API  to handle the client requests from our search UI. API Gateway routes requests to the appropriate Lambda function for processing.
+
+We define API endpoints like:
+
+- `/generatePresignURL` - Returns a pre-signed S3 URL for image upload.
+- `/submitJob` - Kicks off the search workflow by storing job details in DynamoDB.
+- `/getProducts` - Returns the list of similar products for the search.
+- `/getEmbedding` - returns the computed embedding of the uploaded image
+
+#### Lambda Functions
+
+Serverless Lambda functions implement the key backend logic for search. We utilize the following functions:
+
+**generatePresignedURLHandler**
+
+Generates a pre-signed URL for uploading the query image to S3.
+
+```python
+
+```
+
+**submitJobHandler** 
+
+Initializes a new search job record in DynamoDB to track job status throughout the workflow.
+
+```python
+
+```
+
+**inferenceHandler**
+
+Sends the query image to the SageMaker endpoint to generate an embedding vector. Updates job status.
+
+```python
+
+```
+
+**getProductsHandler**
+
+Retrieves the products corresponding to the most similar vectors found by the frontend.
+
+```python
+
+```
+
+#### DynamoDB
+
+We use a DynamoDB table to store search job metadata, tracking status as it progresses through the workflow. The job records contain info like:
+- clientId
+- jobId
+- jobStatus
+- S3ObjectKey
+
+This provides a simple way to track and monitor each search execution.
+
+Let's walk through a search workflow:
+![Alt text](ImageSearch-Phase1-search.png "Title")
+
+1.	the frontend client submits a job to our hosted API triggering the submitJobHandler lambda that creates a new job record in our metadata table
+2. the frontend client sends a request to our hosted API triggering the generatePresignedURLHandler lambda that generates an s3 presigned url.
+3.	the client then uploads the query image to s3 using the presigned url. 
+4.	Once the image upload is complete, another request is sent to the API, triggering the inferenceHandler lambda which translates our query image to an embedding using our model endpoint hosted on sagemaker.
+5.	The translated embedding is sent back to the client which then performs a similarity search against the vector data stores. The most similar embeddings are then mapped to their corresponding product ids.
+6.	A request is sent to our API  triggering the getProducts lambda that retrieves the most similar  products ids using the product ids.
+
+
+The backend components come together to provide a scalable and fully managed search pipeline for our visual search application. API Gateway, Lambda, and DynamoDB combine to receive requests, orchestrate the workflow, generate embeddings, retrieve results, and store metadata.
+
 ### Creating the Search Application Frontend
 - Use Streamlit to build simple interface for visual search.
 - Overview of how frontend connects to backend API.
