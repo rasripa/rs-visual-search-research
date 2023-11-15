@@ -120,6 +120,8 @@ def predict_fn(request_content_type_and_input_object, model_and_processor):
     inputs = input_processors[request_content_type](input_object)
     return feature_getters[request_content_type](inputs)
 ```
+The inference handler script we have created here takes image byte objects or text and uses the clip model to process and compute embeddings of the inputs.
+
 For more details on the Sagemaker Inference Toolkit and functions to be implemented please refer to the [documentation](https://docs.aws.amazon.com/sagemaker/latest/dg/adapt-inference-container.html) and [git repo](https://github.com/aws/sagemaker-inference-toolkit).
 
 Next, we'll package the open source CLIP model along with the inference handler script in a model.tar.gz and copy to an Amazon S3 bucket location.
@@ -174,7 +176,7 @@ Faiss enables ultra-fast similarity search on vector embeddings, making it ideal
 
 Faiss is an open source library developed by Facebook AI Research for efficient similarity search and clustering of dense vectors. Some key features:
 
-- Optimized data structures like inverted indexes for rapid nearest neighbor search.
+- Optimized data structures like inverted indices for rapid nearest neighbor search.
 - Support for GPU acceleration for high throughput ingestion and low latency queries.  
 - Flexible indexing options - flat, hierarchical, IVF (inverted file).
 
@@ -182,7 +184,7 @@ By using Faiss to index the CLIP embeddings for our product catalog, we gain sub
 
 #### Indexing Process
 
-To build our Faiss indexes:
+To build our Faiss indices:
 
 1. Fetch product images and descriptions from our catalog database.
 
@@ -190,13 +192,33 @@ To build our Faiss indexes:
 
 3. Pass each product's title and description through CLIP to get a text embedding. 
 
-4. Add the image and text embedding vectors to their respective Faiss indexes. 
+4. Add the image and text embedding vectors to their respective Faiss indices. 
 
 5. Store the index position to product ID mapping for retrieval.
 
 This gives us two vector databases - one for visual similarity based on product images, and one for semantic similarity based on product text.
 
 #### Implementation Details
+We will define our functions to compute embeddings from our inference endpoint
+
+```
+def get_image_embedding(image_info, clip_model):
+    clip_model.serializer = IdentitySerializer(content_type="application/x-image")
+    clip_model.deserializer = JSONDeserializer()
+    #clip_model.accept = 'application/json'
+    return  clip_model.predict(
+        data=image_info
+    )
+def get_text_embedding(text, clip_model):
+    clip_model.serializer = JSONSerializer()
+    clip_model.deserializer = JSONDeserializer()
+    #clip_model.accept = 'application/json'
+    return clip_model.predict({
+        "inputs":
+            text
+        
+    })
+```
 
 To allow  multi-threaded ingestion into Faiss, we:
 
@@ -205,7 +227,7 @@ To allow  multi-threaded ingestion into Faiss, we:
 NUM_PROCESSES = 400
 items_chunks = split_data(items, NUM_PROCESSES)
 ```
-- Generate partial indexes per chunk using CLIP.
+- Generate partial indices per chunk using CLIP.
 ```
 def process_records_partial(items_chunk):
     
@@ -252,7 +274,7 @@ def process_records_partial(items_chunk):
     return local_image_embeddings, local_text_embeddings, local_image_id_to_record, local_text_id_to_record
 
 ```
-- Merge the partial indexes into the final Faiss stores.
+- Merge the partial indices into the final Faiss stores.
 ```
 with ThreadPoolExecutor(max_workers=NUM_PROCESSES) as executor:
     futures = [executor.submit(process_records_partial, chunk) for chunk in tqdm(items_chunks)]
