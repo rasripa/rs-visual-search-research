@@ -24,68 +24,15 @@ Let's get started!
 - Briefly introduce CLIP and how it can enable visual search by creating joint embeddings for images and text.
 - Step-by-step walkthrough of deploying CLIP inference endpoint on SageMaker using the Inference Toolkit.
 - Explain the purpose of the inference endpoint and how it will be used.
-CLIP (Contrastive Language-Image Pretraining) is a neural network model developed by OpenAI that has been pre-trained on a variety of (image, text) pairs scraped from the internet. It excels at finding semantic similarities between images and text descriptions. 
+
+CLIP (Contrastive Language-Image Pretraining) is a neural network model developed by OpenAI that has been pre-trained on a variety of (image, text) pairs from the internet. It excels at finding semantic similarities between images and text descriptions. 
 
 CLIP creates a joint embedding space for images and text, meaning it can encode both modalities into the same high-dimensional vector representation. Images and texts with similar meaning will have closer embeddings in this space. This makes CLIP ideal for visual search, as we can embed product images and descriptions into a common vector space and find similarities.
 
 To leverage CLIP for our visual search system, we will deploy it as an inference endpoint on SageMaker. 
 
-Firstly, since we want the inference results to be computed embeddings, we use the [SageMaker Inference Toolkit](https://docs.aws.amazon.com/sagemaker/latest/dg/adapt-inference-container.html) to creat a custom inference handler script to handle requests and responses to/from the model. 
-```
-%%writefile code/inference.py
-import io
-import json
-import logging
-import sys
-from typing import Dict, Tuple
-import torch
-from PIL import Image
-from transformers import CLIPProcessor, CLIPModel
-import numpy as np
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-logger.addHandler(logging.StreamHandler(sys.stdout))
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def accurate_token_count(text: str, processor: CLIPProcessor) -> int:
-    return len(processor.tokenizer(text).input_ids)
-
-def chunk_text(text: str, processor: CLIPProcessor, max_tokens: int = 77) -> list:
-    words = text.split()
-    chunks, chunk, tokens = [], [], 0
-    
-    for word in words:
-        new_token_count = accurate_token_count(word, processor)
-        if tokens + new_token_count > max_tokens:
-            chunks.append(" ".join(chunk))
-            chunk = [word]
-            tokens = new_token_count
-        else:
-            chunk.append(word)
-            tokens += new_token_count
-            
-    if chunk:
-        chunks.append(" ".join(chunk))
-        
-    return chunks
-
-def model_fn(model_dir: str) -> Tuple[CLIPModel, CLIPProcessor]:
-    model = CLIPModel.from_pretrained(model_dir).to(device)
-    processor = CLIPProcessor.from_pretrained(model_dir)
-    return model, processor
-
-def input_fn(request_body, request_content_type):
-    assert request_content_type in ("application/json", "application/x-image"), f"{request_content_type} is an unknown type."
-    
-    content_type_map = {
-        "application/json": lambda x: json.loads(x)["inputs"],
-        "application/x-image": lambda x: Image.open(io.BytesIO(x))
-    }
-    
-    return request_content_type, content_type_map[request_content_type](request_body)
-
+Firstly, since we want the inference results to be computed embeddings, we use the [SageMaker Inference Toolkit](https://docs.aws.amazon.com/sagemaker/latest/dg/adapt-inference-container.html) to creat a custom inference handler script to handle requests and responses to/from the model. For example we define a predict_fn function that takes an inference request body and content type as input and computes embeddings of the request body using our model:
+```python
 def predict_fn(request_content_type_and_input_object, model_and_processor):
     model, processor = model_and_processor
     request_content_type, input_object = request_content_type_and_input_object
@@ -106,40 +53,12 @@ def predict_fn(request_content_type_and_input_object, model_and_processor):
                 logger.error(f"Text chunk '{text_chunk}' of length {len(text_chunk)} caused an error: {e}")
 
         return (features_sum / count).detach()
-        
-    input_processors = {
-        "application/x-image": lambda x: processor(images=x, padding=True, return_tensors="pt").to(device),
-        "application/json": lambda x: chunk_and_process_text(x)
-    }
-    
-    feature_getters = {
-        "application/x-image": lambda x: model.get_image_features(**x),
-        "application/json": lambda x: x 
-    }
-    
-    inputs = input_processors[request_content_type](input_object)
-    return feature_getters[request_content_type](inputs)
-```
-The inference handler script we have created here takes image byte objects or text and uses the clip model to process and compute embeddings of the inputs.
-
-For more details on the Sagemaker Inference Toolkit and functions to be implemented please refer to the [documentation](https://docs.aws.amazon.com/sagemaker/latest/dg/adapt-inference-container.html) and [git repo](https://github.com/aws/sagemaker-inference-toolkit).
-
-Next, we'll package the open source CLIP model along with the inference handler script in a model.tar.gz and copy to an Amazon S3 bucket location.
-```
-repository = "openai/clip-vit-large-patch14"
-model_id=repository.split("/")[-1]
-s3_location=f"s3://{sagesess.default_bucket()}/custom_inference/{model_id}/model.tar.gz"
-%conda install -y -c conda-forge git-lfs
-!git lfs install
-!git clone https://huggingface.co/$repository
-!cp -r code/ $model_id/code/
-%cd $model_id
-!tar zcvf model.tar.gz *
-!aws s3 cp model.tar.gz $s3_location
 ```
 
-We then deploy our model to a Sagemaker inference endpoint
-```
+We package the CLIP model along with the inference handler script in a model.tar.gz and copy to an Amazon S3 bucket location for deployment to a sagemaker inference endpoint.
+
+We then deploy our model, here is sample code of the deployment
+```python
 from sagemaker.huggingface.model import HuggingFaceModel
 
 # create Hugging Face Model Class
@@ -152,7 +71,7 @@ huggingface_model = HuggingFaceModel(
     sagemaker_session = sagesess
 )
 
-# deploy the endpoint endpoint
+# deploy the endpoint 
 clip_model = huggingface_model.deploy(
     initial_instance_count=1,
     instance_type="ml.g4dn.xlarge",
@@ -162,12 +81,11 @@ clip_model = huggingface_model.deploy(
 
 Now we have a hosted CLIP inference endpoint on SageMaker that can accept image and text inputs and return embeddings for each. We can integrate this into our overall architecture by having our Lambda functions send requests during ingestion and search. The embeddings will populate our Faiss vector stores.
 
-In summary, deploying CLIP inference on SageMaker provides a scalable and fully managed way to generate multimodal embeddings from images and text within our visual search system. The hosted endpoint will be leveraged throughout our architecture.
-
 ### Building Product Image and Text Vector Stores with Faiss
 - Using in memory, can use opensearch, pgvector postgres any other
 - Explain how Faiss library allows efficient similarity search on vectors.
 - Walk through process of indexing product images and text in Faiss using CLIP endpoint.
+
 Now that we have our CLIP inference endpoint deployed on SageMaker, we can use it to embed our product catalog images and text into a numerical vector space. To enable ultra-fast similarity search on these embeddings, we will build vector databases using Faiss.
 
 Faiss enables ultra-fast similarity search on vector embeddings, making it ideal for powering visual search on our CLIP image and text embeddings. 
@@ -199,20 +117,18 @@ To build our Faiss indices:
 This gives us two vector databases - one for visual similarity based on product images, and one for semantic similarity based on product text.
 
 #### Implementation Details
-We will define our functions to compute embeddings from our inference endpoint
+We will define our functions to send inference requests to our inference endpoint to compute embeddings:
 
-```
+```python
 def get_image_embedding(image_info, clip_model):
     clip_model.serializer = IdentitySerializer(content_type="application/x-image")
     clip_model.deserializer = JSONDeserializer()
-    #clip_model.accept = 'application/json'
     return  clip_model.predict(
         data=image_info
     )
 def get_text_embedding(text, clip_model):
     clip_model.serializer = JSONSerializer()
     clip_model.deserializer = JSONDeserializer()
-    #clip_model.accept = 'application/json'
     return clip_model.predict({
         "inputs":
             text
@@ -223,12 +139,12 @@ def get_text_embedding(text, clip_model):
 To allow  multi-threaded ingestion into Faiss, we:
 
 - Split the product catalog into chunks for multi-threaded processing.
-```
+```python
 NUM_PROCESSES = 400
 items_chunks = split_data(items, NUM_PROCESSES)
 ```
 - Generate partial indices per chunk using CLIP.
-```
+```python
 def process_records_partial(items_chunk):
     
     initialise_clip_model()
@@ -247,16 +163,19 @@ def process_records_partial(items_chunk):
         
         image_embedding_count = 0
         for image in image_url_list:
+            #here we fetch our product images
             image_response = fetch_image(image)
             if not image_response[1]:
                 continue
             try:
                 image_content = image_response[0]
+                #send each image as an inference request to our endpoint to compute image embedding
                 local_image_embeddings.append(normalise_embedding(np.array(get_image_embedding(image_content, clip_model)).astype('float32')))
                 image_embedding_count += 1
             except Exception as e:
                 pass
 
+            #Store the image embedding index position to product ID mapping for retrieval
             local_image_id_to_record[image_idx] = product_id
             image_idx += 1
 
@@ -264,8 +183,10 @@ def process_records_partial(items_chunk):
             continue
 
         try:
+            #send the product description as an inference request to our endpoint to compute text embedding
             text_embedding_flt = np.array(get_text_embedding(clean_and_prepare_text(description), clip_model)).astype('float32')
             local_text_embeddings.append(normalise_embedding(text_embedding_flt))
+            #Store the text embedding index position to product ID mapping for retrieval
             local_text_id_to_record[idx] = product_id
             idx += 1
         except Exception as e:
@@ -275,7 +196,7 @@ def process_records_partial(items_chunk):
 
 ```
 - Merge the partial indices into the final Faiss stores.
-```
+```python
 with ThreadPoolExecutor(max_workers=NUM_PROCESSES) as executor:
     futures = [executor.submit(process_records_partial, chunk) for chunk in tqdm(items_chunks)]
 
@@ -291,17 +212,21 @@ text_idx = 0
 for future in tqdm(futures):
     local_image_embeddings, local_text_embeddings, local_image_id_to_record, local_text_id_to_record = future.result()
 
+    #merge all the image and text embeddings from all threads
     global_image_embeddings.extend(local_image_embeddings)
     global_text_embeddings.extend(local_text_embeddings)
 
+    #Store the image embedding index positions from all threads to product ID mapping for retrieval
     for local_idx, product_id in local_image_id_to_record.items():
         global_image_id_to_record[image_idx] = product_id
         image_idx += 1
-
+    
+    #Store the text embedding index positions from all threads to product ID mapping for retrieval
     for local_idx, product_id in local_text_id_to_record.items():
         global_text_id_to_record[text_idx] = product_id
         text_idx += 1
 
+#add all the embeddings to our FAISS indices
 image_index.add(np.vstack(global_image_embeddings).astype('float32'))
 text_index.add(np.vstack(global_text_embeddings).astype('float32'))
 ```
