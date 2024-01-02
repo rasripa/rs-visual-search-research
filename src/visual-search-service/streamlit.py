@@ -1,9 +1,11 @@
 import streamlit as st
-from services import ImageSearchService
 import time
 from PIL import Image
 import requests
 from io import BytesIO
+from services import ImageSearchService
+
+
 
 @st.cache_resource
 def get_image_search_service():
@@ -70,16 +72,15 @@ def main():
             st.image(uploaded_file, caption='Uploaded Image.', use_column_width=True)
             st.write("")
             st.write("Classifying...")
-            service.submit_job_sync(uploaded_file)
+            service.search_image(uploaded_file)
             
         if 'shown_jobs' not in st.session_state:
             st.session_state.shown_jobs = set()
 
-        # Keep checking and updating job statuses every 2 seconds
         while True:
             display_job_statuses(service, st.session_state)
 
-            time.sleep(2)  # Delay for 2 seconds
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()
