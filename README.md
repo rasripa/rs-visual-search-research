@@ -1,2 +1,2 @@
 # rs-visualsearch
-Innovation Repo for Visual Search
+Experimental Repo for Visual Search solution guidance
