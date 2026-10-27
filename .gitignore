@@ -5,3 +5,9 @@ logs/
 __pycache__/
 .DS_Store
 clip-vit-large-patch14/
+
+# FAISS index build artifacts — regenerate from the notebooks
+*.index
+
+# third-party dataset — download separately, see README
+flipkart_com-ecommerce_sample.csv

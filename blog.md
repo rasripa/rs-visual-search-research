@@ -64,7 +64,7 @@ from sagemaker.huggingface.model import HuggingFaceModel
 # create Hugging Face Model Class
 huggingface_model = HuggingFaceModel(
     model_data=s3_location,       # path to your model and script
-    role="arn:aws:iam::669775656565:role/service-role/AmazonSageMaker-ExecutionRole-20231011T142825",
+    role="arn:aws:iam::ACCOUNT_ID:role/service-role/AmazonSageMaker-ExecutionRole-EXAMPLE",
     transformers_version="4.26.0",  # transformers version used
     pytorch_version="1.13.1",        # pytorch version used
     py_version='py39', # python version used
